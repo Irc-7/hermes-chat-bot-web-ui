@@ -134,12 +134,14 @@ def summarize_sessions_dir(sessions_dir, *, now=None, last_seen_at=None):
             activities.append(_entry_activity(entry))
     else:
         # Fallback: mtimes only. Session JSON bodies are deliberately
-        # never opened — their content is not metadata.
+        # never opened — their content is not metadata. Underscore-
+        # prefixed files are sidecars, not sessions — the session
+        # store's own index rebuild skips them too (api.models).
         try:
             files = [
                 p
                 for p in sessions_dir.glob("*.json")
-                if p.name != "_index.json" and p.is_file()
+                if not p.name.startswith("_") and p.is_file()
             ]
         except OSError:
             files = []
