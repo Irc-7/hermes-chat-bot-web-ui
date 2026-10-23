@@ -30,9 +30,17 @@
   var _activityLines = [];   // {ts, text}
   var _activityOpen = false;
   var _seenToolEls = (typeof WeakSet === 'function') ? new WeakSet() : null;
-  var _lastAttentionKey = '';
   var _lastStreaming = false;
   var _started = false;
+  // Render memoization: the 1s tick + #sessionList observer call the
+  // refresh path constantly; without signatures every call rebuilt the
+  // rail / attention list / breadcrumb DOM, dropping button focus and
+  // racing clicks. DOM writes now happen only when the rendered result
+  // actually changes.
+  var _railSig = null;
+  var _attnSig = null;
+  var _frameSig = null;
+  var _showingActivity = false;
 
   function $(id) { return document.getElementById(id); }
   function _t(key, fallback) {
@@ -123,9 +131,14 @@
       if (pa !== pb) return pa - pb;
       return String(a.name).localeCompare(String(b.name));
     });
+    var badges = sorted.map(function (p) { return _badgeFor(p.name); });
+    var sig = active + '|' + pins.join(',') + '|' + JSON.stringify(groups)
+      + '|' + sorted.map(function (p, i) { return p.name + ':' + badges[i]; }).join(',');
+    if (sig === _railSig) return;
+    _railSig = sig;
     zone.textContent = '';
     var lastGroup = null;
-    sorted.forEach(function (p) {
+    sorted.forEach(function (p, idx) {
       var group = groups[p.name] || '';
       if (group !== lastGroup) {
         if (group) {
@@ -137,14 +150,16 @@
         }
         lastGroup = group;
       }
-      var badge = _badgeFor(p.name);
+      var badge = badges[idx];
+      var pinned = pins.indexOf(p.name) !== -1;
       var btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'bot-rail-btn'
         + (p.name === active ? ' active' : '')
-        + (pins.indexOf(p.name) !== -1 ? ' pinned' : '');
+        + (pinned ? ' pinned' : '');
       btn.setAttribute('aria-label', p.name);
-      btn.title = p.name + (badge ? ' — ' + _badgeTitle(badge) : '');
+      btn.title = p.name + (badge ? ' — ' + _badgeTitle(badge) : '')
+        + ' · ' + _t(pinned ? 'bot_unpin' : 'bot_pin', pinned ? 'Unpin bot' : 'Pin bot');
       var initials = document.createElement('span');
       initials.textContent = _initials(p.name);
       btn.appendChild(initials);
@@ -188,6 +203,10 @@
     if (ok === false) { _refreshData(); return; }
     if (typeof switchPanel === 'function') switchPanel('chat');
     _botRailRefresh();
+    // Refresh cross-profile badge data now instead of waiting for the
+    // 60s poll: the previously-active profile's badge source changes
+    // the moment it becomes non-active.
+    _refreshData();
     _openLastSessionFor(name);
   }
 
@@ -222,6 +241,14 @@
         if (a) rows.push({ s: all[i], a: a });
       }
     }
+    // Skip the DOM rebuild when the rendered rows are unchanged (the
+    // refresh path runs every second and on every session-list mutation;
+    // rebuilding identical rows would drop focus and race clicks).
+    var key = rows.map(function (r) {
+      return r.s.session_id + ':' + r.a.kind + ':' + r.a.label + ':' + (r.s.title || '');
+    }).join(',');
+    if (key === _attnSig) return;
+    _attnSig = key;
     list.textContent = '';
     rows.forEach(function (row) {
       var btn = document.createElement('button');
@@ -245,16 +272,13 @@
     });
     sec.hidden = rows.length === 0;
 
-    // Feed the activity panel + detect resolution (section empties out
-    // live when an approval is answered, because the underlying session
-    // rows lose their `attention` payload on the next list refresh).
-    var key = rows.map(function (r) { return r.s.session_id + ':' + r.a.kind; }).join(',');
-    if (key !== _lastAttentionKey) {
-      if (key && rows.length) {
-        _pushActivity(_t('bot_needs_attention', 'Needs attention') + ': '
-          + (rows[0].s.title || rows[0].s.session_id || '') + ' (' + rows[0].a.label + ')');
-      }
-      _lastAttentionKey = key;
+    // Feed the activity panel (this point is only reached when the key
+    // changed — see the memoization above; the section empties out live
+    // when an approval is answered, because the underlying session rows
+    // lose their `attention` payload on the next list refresh).
+    if (key && rows.length) {
+      _pushActivity(_t('bot_needs_attention', 'Needs attention') + ': '
+        + (rows[0].s.title || rows[0].s.session_id || '') + ' (' + rows[0].a.label + ')');
     }
   }
 
@@ -269,6 +293,10 @@
     return panel ? panel.charAt(0).toUpperCase() + panel.slice(1) : '';
   }
   function _syncFraming() {
+    if (PANEL_CTX[_currentPanel]) _ctx = PANEL_CTX[_currentPanel];
+    var frameSig = _activeName() + '/' + _currentPanel + '/' + _ctx;
+    if (frameSig === _frameSig) return;
+    _frameSig = frameSig;
     var bc = $('botBreadcrumb');
     if (bc) {
       var name = _activeName();
@@ -366,10 +394,30 @@
     var ft = $('fileTree');
     if (ft && ft.style.display === 'none') ft.style.display = '';
   }
+  // Any workspace-tab switch NOT initiated by botRailShowActivity itself
+  // must close the Activity pane: openArtifactPath() and other flows call
+  // switchWorkspacePanelTab('files') programmatically, and the dataset
+  // observer below cannot see a 'files' -> 'files' no-op transition —
+  // without this wrap the file tree stayed display:none behind a stale
+  // Activity pane with two tabs highlighted.
+  function _wrapWorkspaceTabSwitch() {
+    if (typeof switchWorkspacePanelTab !== 'function' || switchWorkspacePanelTab._botRailWrapped) return;
+    var orig = switchWorkspacePanelTab;
+    var wrapped = function (tab) {
+      var r = orig.apply(this, arguments);
+      if (!_showingActivity && _activityOpen) _closeActivity();
+      return r;
+    };
+    wrapped._botRailWrapped = true;
+    try { window.switchWorkspacePanelTab = wrapped; } catch (_) { /* non-configurable: dataset observer still covers artifacts/todos */ }
+  }
   function botRailShowActivity() {
     // Reset the built-in tabs through their own switch first so their
     // pane bookkeeping stays consistent, then take over the visuals.
-    if (typeof switchWorkspacePanelTab === 'function') switchWorkspacePanelTab('files');
+    _showingActivity = true;
+    try {
+      if (typeof switchWorkspacePanelTab === 'function') switchWorkspacePanelTab('files');
+    } finally { _showingActivity = false; }
     _activityOpen = true;
     _lsSet(LS_ACTIVITY_TAB, true);
     ['workspaceFilesTab', 'workspaceArtifactsTab', 'workspaceTodosTab'].forEach(function (id) {
@@ -488,6 +536,7 @@
     if (_started) return;
     _started = true;
     _wrapSwitchPanel();
+    _wrapWorkspaceTabSwitch();
     _wireActivityTabRestore();
     _observeTranscript();
     _refreshData();
