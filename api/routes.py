@@ -17438,6 +17438,28 @@ def handle_get(handler, parsed) -> bool:
             if diag:
                 diag.finish()
 
+    if parsed.path == "/api/bots/status":
+        # Read-only cross-profile badge metadata (bot-rail spec Fase 2).
+        # Reads session-store metadata from disk via api.bot_status only —
+        # never activates a profile, never returns message content. Auth is
+        # enforced by the same dispatch gate as /api/profiles above.
+        from api import bot_status as _bot_status
+        from api import profiles as profiles_api
+        from api.config import SESSION_DIR as _active_session_dir
+
+        try:
+            _rows = profiles_api.list_profiles_api()
+        except Exception:
+            logger.debug("Failed to list profiles for bot status", exc_info=True)
+            _rows = []
+        _active = profiles_api.get_active_profile_name()
+        return j(handler, {
+            "profiles": _bot_status.collect_bot_statuses(
+                _rows, _active, active_sessions_dir=_active_session_dir
+            ),
+            "active": _active,
+        })
+
     if parsed.path == "/api/profile/active":
         from api import profiles as profiles_api
 
