@@ -26,7 +26,7 @@
   var _profiles = [];        // rows from /api/profiles
   var _statusByName = {};    // rows from /api/bots/status keyed by name
   var _currentPanel = 'chat';
-  var _ctx = 'chat';         // chat | sessions | routines | files | settings
+  var _ctx = 'chat';         // chat | bot
   var _activityLines = [];   // {ts, text}
   var _activityOpen = false;
   var _seenToolEls = (typeof WeakSet === 'function') ? new WeakSet() : null;
@@ -283,8 +283,12 @@
   }
 
   // ── Framing: breadcrumb + context tabs ──────────────────────────────
-  var PANEL_CTX = { tasks: 'routines', workspaces: 'files', profiles: 'settings', settings: 'settings' };
-  var CTX_PANEL = { chat: 'chat', sessions: 'chat', routines: 'tasks', files: 'workspaces', settings: 'profiles' };
+  // Simplified to two contexts (Grok Bot style): Chat is the chat panel
+  // (the sidebar session list is its session UI); Bot is the active
+  // profile's home — the profiles panel. Routines stay reachable via the
+  // tasks icon in the rail function zone; files via the workspace panel.
+  var PANEL_CTX = { chat: 'chat', profiles: 'bot' };
+  var CTX_PANEL = { chat: 'chat', bot: 'profiles' };
 
   function _panelLabel(panel) {
     var key = 'tab_' + panel;
@@ -332,10 +336,6 @@
     _ctx = ctx;
     if (typeof switchPanel === 'function') switchPanel(CTX_PANEL[ctx]);
     _syncContextTabs();
-    if (ctx === 'sessions') {
-      var inp = $('sessionSearch');
-      if (inp) { try { inp.focus(); } catch (_) { /* noop */ } }
-    }
   }
 
   function _wrapSwitchPanel() {
